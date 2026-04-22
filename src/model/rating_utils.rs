@@ -88,15 +88,14 @@ pub fn create_initial_ratings(players: &[Player], matches: &[Match]) -> Vec<Play
     ratings
 }
 
-pub fn default_beatmap_rating(b: &Beatmap) -> BeatmapRating {
+pub fn default_beatmap_rating(b: &Beatmap, mods: i32) -> BeatmapRating {
     BeatmapRating {
         id: 0, // set by db
         beatmap_id: b.id,
         ruleset: b.ruleset,
-        mods: 0, // nomod
+        mods,
         rating: initial_map_rating(b),
         volatility: DEFAULT_VOLATILITY,
-        count_played: 0,
         adjustments: vec![BeatmapRatingAdjustment {
             id: 0, // set by db
             beatmap_id: b.id,

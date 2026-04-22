@@ -135,9 +135,34 @@ impl DbClient {
         self.client
             .batch_execute(
                 "\
+DROP TABLE IF EXISTS public.beatmap_ratings;
+
+CREATE TABLE public.beatmap_ratings
+(
+    id         integer GENERATED ALWAYS AS IDENTITY
+        CONSTRAINT beatmap_ratings_pk
+            PRIMARY KEY,
+    beatmap_id integer                                            NOT NULL
+        CONSTRAINT beatmap_ratings_beatmaps_id_fk
+            REFERENCES public.beatmaps
+            ON DELETE CASCADE,
+    mods       integer                                            NOT NULL,
+    ruleset    integer                                            NOT NULL,
+    rating     double precision         DEFAULT 1500.0            NOT NULL,
+    volatility double precision         DEFAULT 400.0             NOT NULL,
+    created    timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+ALTER TABLE public.beatmap_ratings
+    OWNER TO postgres;
+
+DROP TABLE IF EXISTS public.beatmap_rating_adjustments;
+
 CREATE TABLE public.beatmap_rating_adjustments
 (
-    id                integer                                            NOT NULL,
+    id                integer GENERATED ALWAYS AS IDENTITY
+        CONSTRAINT beatmap_rating_adjustments_pk
+            PRIMARY KEY,
     mods              integer                                            NOT NULL,
     ruleset           integer                                            NOT NULL,
     rating_before     double precision                                   NOT NULL,
@@ -160,6 +185,9 @@ CREATE TABLE public.beatmap_rating_adjustments
             ON DELETE CASCADE,
     created           timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
+
+ALTER TABLE public.beatmap_rating_adjustments
+    OWNER TO postgres;
         "
             )
             .await
@@ -708,10 +736,12 @@ CREATE TABLE public.beatmap_rating_adjustments
             return;
         }
 
-        let copy_query = "COPY beatmap_rating_adjustments (beatmap_id, beatmap_rating_id, mods, ruleset, game_id, rating_before, rating_after, volatility_before, volatility_after, timestamp, adjustment_type) \
+        let copy_query = "COPY beatmap_rating_adjustments (\
+        beatmap_id, beatmap_rating_id, mods, ruleset, game_id,\
+        rating_before, rating_after, volatility_before, volatility_after, timestamp, adjustment_type) \
         FROM STDIN WITH (FORMAT TEXT, DELIMITER E'\\t')";
 
-        let span = progress_span(adjustment_mapping.len() as u64, "Saving rating adjustments");
+        let span = progress_span(adjustment_mapping.len() as u64, "Saving beatmap rating adjustments");
         let _guard = span.enter();
 
         let sink = self

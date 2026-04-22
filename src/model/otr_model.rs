@@ -210,17 +210,13 @@ impl OtrModel {
             game.scores.iter().into_grouping_map_by(|s| s.mods).collect();
 
         for (mods, scores) in scores_by_mod {
-            if mods != 0 {
-                // TODO: impl mods
-                continue;
-            }
-
             let beatmap_rating = self
                 .beatmap_ratings
                 .entry((game.beatmap_id, game.ruleset, mods))
                 .or_insert_with(|| {
                     crate::model::rating_utils::default_beatmap_rating(
-                        self.beatmaps.iter().find(|b| b.id == game.beatmap_id).unwrap()
+                        self.beatmaps.iter().find(|b| b.id == game.beatmap_id).unwrap(),
+                        mods
                     )
                 });
 
@@ -267,12 +263,28 @@ impl OtrModel {
         rating_by_mod
     }
 
+    /// roughly based on the 50th percentile of verified no-mod scores
+    ///
+    /// ```sql
+    /// SELECT gs.ruleset,
+    ///     AVG(gs.score),
+    ///     STDDEV(gs.score),
+    ///     PERCENTILE_CONT(0.25) WITHIN GROUP ( ORDER BY gs.score ),
+    ///     PERCENTILE_CONT(0.5) WITHIN GROUP ( ORDER BY gs.score ), -- <<<<<<<
+    ///     PERCENTILE_CONT(0.75) WITHIN GROUP ( ORDER BY gs.score )
+    /// FROM game_scores gs
+    ///     JOIN public.games g ON gs.game_id = g.id
+    /// WHERE g.mods = 0
+    ///     AND g.verification_status = 4
+    /// GROUP BY gs.ruleset
+    /// ```
     fn clear_threshold(ruleset: &Ruleset) -> i32 {
         match ruleset {
-            Ruleset::Osu => 500000,
-            Ruleset::Taiko => 900000,
-            Ruleset::Catch => 900000,
-            Ruleset::ManiaOther | Ruleset::Mania4k | Ruleset::Mania7k => 900000
+            Ruleset::Osu => 500_000,
+            Ruleset::Taiko => 975_000,
+            Ruleset::Catch => 930_000,
+            Ruleset::ManiaOther | Ruleset::Mania4k => 980_000,
+            Ruleset::Mania7k => 950_000
         }
     }
 

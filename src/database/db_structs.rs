@@ -51,7 +51,6 @@ pub struct BeatmapRating {
     pub mods: i32,
     pub rating: f64,
     pub volatility: f64,
-    pub count_played: i32,
     pub adjustments: Vec<BeatmapRatingAdjustment>
 }
 
