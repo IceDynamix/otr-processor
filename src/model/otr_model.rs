@@ -206,8 +206,11 @@ impl OtrModel {
     fn rate_map_by_mods(&mut self, game: &Game) -> HashMap<Mods, Rating> {
         let mut rating_by_mod: HashMap<Mods, Rating> = HashMap::new();
 
-        let scores_by_mod: HashMap<Mods, Vec<&GameScore>> =
-            game.scores.iter().into_grouping_map_by(|s| s.mods).collect();
+        let scores_by_mod: HashMap<Mods, Vec<&GameScore>> = game
+            .scores
+            .iter()
+            .into_grouping_map_by(|s| s.mods.ruleset_relevant_mods(&game.ruleset))
+            .collect();
 
         for (mods, scores) in scores_by_mod {
             let beatmap_rating = self
