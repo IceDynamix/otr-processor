@@ -131,7 +131,7 @@ fn initial_map_rating(beatmap: &Beatmap, mods: Mods) -> (f64, f64) {
         sr *= 1.1;
     }
 
-    (mu_from_star_rating(sr, &beatmap.ruleset), DEFAULT_VOLATILITY / 200.0)
+    (mu_from_star_rating(sr, &beatmap.ruleset), DEFAULT_VOLATILITY / 2.0)
 }
 // take the 50th percentile of star rating, linear interpolation forth and back, and pray
 /// ```
