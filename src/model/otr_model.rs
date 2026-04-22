@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     database::db_structs::{
-        Beatmap, BeatmapRating, BeatmapRatingAdjustment, Game, GameScore, Match, PlayerRating, RatingAdjustment
+        Beatmap, BeatmapRating, BeatmapRatingAdjustment, Game, GameScore, Match, Mods, PlayerRating, RatingAdjustment
     },
     model::{
         constants::{
@@ -60,7 +60,7 @@ pub struct OtrModel {
     /// Tracks and maintains all player ratings
     pub rating_tracker: RatingTracker,
     pub beatmaps: Vec<Beatmap>,
-    pub beatmap_ratings: IndexMap<(i32, Ruleset, i32), BeatmapRating>,
+    pub beatmap_ratings: IndexMap<(i32, Ruleset, Mods), BeatmapRating>,
     /// Unified system for rating and volatility decay at Wednesday 12:00 UTC
     decay_system: UnifiedDecaySystem
 }
@@ -203,10 +203,10 @@ impl OtrModel {
         }
     }
 
-    fn rate_map_by_mods(&mut self, game: &Game) -> HashMap<i32, Rating> {
-        let mut rating_by_mod: HashMap<i32, Rating> = HashMap::new();
+    fn rate_map_by_mods(&mut self, game: &Game) -> HashMap<Mods, Rating> {
+        let mut rating_by_mod: HashMap<Mods, Rating> = HashMap::new();
 
-        let scores_by_mod: HashMap<i32, Vec<&GameScore>> =
+        let scores_by_mod: HashMap<Mods, Vec<&GameScore>> =
             game.scores.iter().into_grouping_map_by(|s| s.mods).collect();
 
         for (mods, scores) in scores_by_mod {
@@ -245,12 +245,12 @@ impl OtrModel {
                 .map(|r| vec![r])
                 .collect();
 
-            let threshold = Self::clear_threshold(&game.ruleset);
-            let clearing_scores = scores.iter().filter(|s| s.score >= threshold).count();
+            let threshold = Self::clear_threshold(mods, &game.ruleset);
+            let clearing_scores = scores.iter().filter(|s| s.score as f64 >= threshold).count();
 
             let mut placements: Vec<usize> = scores
                 .iter()
-                .map(|s| (s.placement + if s.score >= threshold { 0 } else { 1 }) as usize)
+                .map(|s| (s.placement + if s.score as f64 >= threshold { 0 } else { 1 }) as usize)
                 .collect();
 
             placements.insert(0, clearing_scores);
@@ -263,14 +263,14 @@ impl OtrModel {
         rating_by_mod
     }
 
-    /// roughly based on the 50th percentile of verified no-mod scores
+    /// roughly based on the 25th percentile of verified no-mod scores
     ///
     /// ```sql
     /// SELECT gs.ruleset,
     ///     AVG(gs.score),
     ///     STDDEV(gs.score),
     ///     PERCENTILE_CONT(0.25) WITHIN GROUP ( ORDER BY gs.score ),
-    ///     PERCENTILE_CONT(0.5) WITHIN GROUP ( ORDER BY gs.score ), -- <<<<<<<
+    ///     PERCENTILE_CONT(0.5) WITHIN GROUP ( ORDER BY gs.score ),
     ///     PERCENTILE_CONT(0.75) WITHIN GROUP ( ORDER BY gs.score )
     /// FROM game_scores gs
     ///     JOIN public.games g ON gs.game_id = g.id
@@ -278,14 +278,18 @@ impl OtrModel {
     ///     AND g.verification_status = 4
     /// GROUP BY gs.ruleset
     /// ```
-    fn clear_threshold(ruleset: &Ruleset) -> i32 {
-        match ruleset {
-            Ruleset::Osu => 500_000,
-            Ruleset::Taiko => 975_000,
-            Ruleset::Catch => 930_000,
-            Ruleset::ManiaOther | Ruleset::Mania4k => 980_000,
-            Ruleset::Mania7k => 950_000
-        }
+    fn clear_threshold(mods: Mods, ruleset: &Ruleset) -> f64 {
+        let base = match ruleset {
+            Ruleset::Osu => 340_000.0,
+            Ruleset::Taiko => 920_000.0,
+            Ruleset::Catch => 840_000.0,
+            Ruleset::ManiaOther | Ruleset::Mania4k => 960_000.0,
+            Ruleset::Mania7k => 920_000.0
+        };
+    
+        let mod_mult = mods.mod_score_multiplier(ruleset);
+    
+        base * mod_mult
     }
 
     /// Generates ratings for each player based on their actual game performances.
@@ -348,7 +352,7 @@ impl OtrModel {
                     game_id: game.id,
                     score: 0,
                     placement: tie_for_last_placement,
-                    mods: 0
+                    mods: Mods::None
                 });
             }
         }
@@ -645,7 +649,7 @@ impl OtrModel {
 mod tests {
     pub use crate::utils::test_utils::*;
     use crate::{
-        database::db_structs::{Game, PlayerPlacement, PlayerRating},
+        database::db_structs::{Game, Mods, PlayerPlacement, PlayerRating},
         model::{
             constants::{ABSOLUTE_RATING_FLOOR, DECAY_DAYS, DEFAULT_VOLATILITY},
             otr_model::OtrModel,
@@ -1291,7 +1295,7 @@ mod tests {
                 game_id: id,
                 score: 0,
                 placement: p.placement,
-                mods: 0
+                mods: Mods::None
             })
             .collect();
 

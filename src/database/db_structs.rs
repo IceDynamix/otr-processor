@@ -1,4 +1,5 @@
 use crate::model::structures::{rating_adjustment_type::RatingAdjustmentType, ruleset::Ruleset};
+use bitflags::bitflags;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +49,7 @@ pub struct BeatmapRating {
     pub id: i32,
     pub beatmap_id: i32,
     pub ruleset: Ruleset,
-    pub mods: i32,
+    pub mods: Mods,
     pub rating: f64,
     pub volatility: f64,
     pub adjustments: Vec<BeatmapRatingAdjustment>
@@ -58,7 +59,7 @@ pub struct BeatmapRating {
 pub struct BeatmapRatingAdjustment {
     pub id: i32,
     pub beatmap_id: i32,
-    pub mods: i32,
+    pub mods: Mods,
     pub ruleset: Ruleset,
     pub game_id: Option<i32>,
     pub rating_before: f64,
@@ -86,7 +87,7 @@ pub struct GameScore {
     pub player_id: i32,
     pub game_id: i32,
     pub score: i32,
-    pub mods: i32, // bitflag?
+    pub mods: Mods, // bitflag?
     pub placement: i32
 }
 
@@ -143,4 +144,60 @@ pub struct TournamentInfo {
     pub name: String,
     pub match_count: i32,
     pub player_count: i32
+}
+
+bitflags! {
+    #[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy, Hash)]
+    #[serde(transparent)]
+    pub struct Mods: i32 {
+        const None = 0;
+        const NoFail = 1;
+        const Easy = 2;
+        const TouchDevice = 4;
+        const Hidden = 8;
+        const HardRock = 16;
+        const SuddenDeath = 32;
+        const DoubleTime = 64;
+        const Relax = 128;
+        const HalfTime = 256;
+        const Nightcore = 512; // Only set along with DoubleTime. i.e: NC only gives 576
+        const Flashlight = 1024;
+        const Autoplay = 2048;
+        const SpunOut = 4096;
+        const Relax2 = 8192;   // Autopilot
+        const Perfect = 16384; // Only set along with SuddenDeath. i.e: PF only gives 16416
+        const Key4 = 32768;
+        const Key5 = 65536;
+        const Key6 = 131072;
+        const Key7 = 262144;
+        const Key8 = 524288;
+        const FadeIn = 1048576;
+        const Random = 2097152;
+        const Cinema = 4194304;
+        const Target = 8388608;
+        const Key9 = 16777216;
+        const KeyCoop = 33554432;
+        const Key1 = 67108864;
+        const Key3 = 134217728;
+        const Key2 = 268435456;
+        const ScoreV2 = 536870912;
+        const Mirror = 1073741824;
+    }
+}
+
+impl Mods {
+    pub fn ruleset_relevant_mods(self, ruleset: &Ruleset) -> Mods {
+        let mod_mask = match ruleset {
+            Ruleset::Osu | Ruleset::Taiko | Ruleset::Catch => {
+                Mods::Easy | Mods::Hidden | Mods::HardRock | Mods::DoubleTime | Mods::HalfTime | Mods::Flashlight
+            }
+            Ruleset::ManiaOther | Ruleset::Mania4k | Ruleset::Mania7k => Mods::DoubleTime | Mods::HalfTime
+        };
+
+        self & mod_mask
+    }
+
+    pub fn mod_score_multiplier(self, ruleset: &Ruleset) -> f64 {
+        1.0 // todo: mod multiplier
+    }
 }

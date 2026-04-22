@@ -1,7 +1,7 @@
 use super::constants::FALLBACK_RATING;
 use crate::{
     database::db_structs::{
-        Beatmap, BeatmapRating, BeatmapRatingAdjustment, Match, Player, PlayerRating, RatingAdjustment
+        Beatmap, BeatmapRating, BeatmapRatingAdjustment, Match, Mods, Player, PlayerRating, RatingAdjustment
     },
     model::{
         constants::{DEFAULT_VOLATILITY, INITIAL_RATING_CEILING, INITIAL_RATING_FLOOR},
@@ -88,32 +88,87 @@ pub fn create_initial_ratings(players: &[Player], matches: &[Match]) -> Vec<Play
     ratings
 }
 
-pub fn default_beatmap_rating(b: &Beatmap, mods: i32) -> BeatmapRating {
+pub fn default_beatmap_rating(b: &Beatmap, mods: Mods) -> BeatmapRating {
+    let (mu, sigma) = initial_map_rating(b, mods);
     BeatmapRating {
         id: 0, // set by db
         beatmap_id: b.id,
         ruleset: b.ruleset,
         mods,
-        rating: initial_map_rating(b),
-        volatility: DEFAULT_VOLATILITY,
+        rating: mu,
+        volatility: sigma,
         adjustments: vec![BeatmapRatingAdjustment {
             id: 0, // set by db
             beatmap_id: b.id,
             ruleset: b.ruleset,
-            mods: 0,
+            mods: Mods::None,
             game_id: None,
             rating_before: 0.0,
-            rating_after: initial_map_rating(b),
+            rating_after: mu,
             volatility_before: 0.0,
-            volatility_after: DEFAULT_VOLATILITY,
+            volatility_after: sigma,
             timestamp: b.created,
             adjustment_type: RatingAdjustmentType::Initial
         }]
     }
 }
 
-fn initial_map_rating(beatmap: &Beatmap) -> f64 {
-    1500.0 // TODO: improve with sr
+fn initial_map_rating(beatmap: &Beatmap, mods: Mods) -> (f64, f64) {
+    let mut sr = beatmap.sr;
+
+    let filtered_mods = mods.ruleset_relevant_mods(&beatmap.ruleset);
+
+    if filtered_mods.contains(Mods::DoubleTime) {
+        sr *= 1.5;
+    }
+    if filtered_mods.contains(Mods::HalfTime) {
+        sr /= 1.5;
+    }
+    if filtered_mods.contains(Mods::Hidden) {
+        sr *= 1.05;
+    }
+    if filtered_mods.contains(Mods::HardRock) {
+        sr *= 1.1;
+    }
+
+    (mu_from_star_rating(sr, &beatmap.ruleset), DEFAULT_VOLATILITY / 200.0)
+}
+// take the 50th percentile of star rating, linear interpolation forth and back, and pray
+/// ```
+/// SELECT FLOOR(ra.rating_after / 100) * 100 AS                rating,
+///        AVG(b.sr)                                            "avg",
+///        STDDEV(b.sr)                                         "stdev",
+///        PERCENTILE_CONT(0.25) WITHIN GROUP ( ORDER BY b.sr ) "P_25",
+///        PERCENTILE_CONT(0.50) WITHIN GROUP ( ORDER BY b.sr ) "P_50",
+///        PERCENTILE_CONT(0.75) WITHIN GROUP ( ORDER BY b.sr ) "P_75",
+///        PERCENTILE_DISC(0.90) WITHIN GROUP ( ORDER BY b.sr ) "P_90",
+///        PERCENTILE_DISC(0.95) WITHIN GROUP ( ORDER BY b.sr ) "P_95",
+///        PERCENTILE_DISC(0.99) WITHIN GROUP ( ORDER BY b.sr ) "P_99",
+///        COUNT(*)                                             "count"
+/// FROM game_scores gs
+///          JOIN public.games g ON gs.game_id = g.id
+///          JOIN public.beatmaps b ON g.beatmap_id = b.id
+///          JOIN public.rating_adjustments ra
+///               ON ra.player_id = gs.player_id AND gs.ruleset = ra.ruleset AND
+///                  ((ra.timestamp - g.start_time) <= INTERVAL '1 day')
+/// WHERE ra.volatility_after < 200
+///   AND g.verification_status = 4
+///   AND g.ruleset = 1
+///   AND g.mods = 0
+///   AND gs.mods = 0
+///   AND ra.rating_after > 500
+///   AND gs.score > 250000
+/// GROUP BY FLOOR(ra.rating_after / 100) * 100
+/// ORDER BY FLOOR(ra.rating_after / 100) * 100;
+/// ```
+fn mu_from_star_rating(sr: f64, ruleset: &Ruleset) -> f64 {
+    match ruleset {
+        Ruleset::Osu | Ruleset::Catch => sr * 1367.40918 - 6775.346485, // 250k score threshold
+        Ruleset::Taiko => sr * 1301.27899 - 6338.942843,
+        // Ruleset::Catch => {} // score threshold 800k, but there's so little data that i'll just copy standard
+        Ruleset::ManiaOther | Ruleset::Mania4k => sr * 1749.712882 - 7719.206747, // score threshold 800k
+        Ruleset::Mania7k => sr * 700.0 - 2300.0                                   // no data, so i'm eyeballing it
+    }
 }
 
 fn initial_rating(player: &Player, ruleset: &Ruleset) -> f64 {

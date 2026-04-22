@@ -1,7 +1,4 @@
-use super::db_structs::{
-    BeatmapRatingAdjustment, Game, GameScore, Match, Player, PlayerHighestRank, PlayerRating, RatingAdjustment,
-    ReplicationRole, RulesetData, TournamentInfo
-};
+use super::db_structs::{BeatmapRatingAdjustment, Game, GameScore, Match, Mods, Player, PlayerHighestRank, PlayerRating, RatingAdjustment, ReplicationRole, RulesetData, TournamentInfo};
 use crate::{
     database::db_structs::{Beatmap, BeatmapRating},
     model::{otr_model::OtrProcessResult, structures::ruleset::Ruleset},
@@ -135,7 +132,7 @@ impl DbClient {
         self.client
             .batch_execute(
                 "\
-DROP TABLE IF EXISTS public.beatmap_ratings;
+DROP TABLE IF EXISTS public.beatmap_ratings CASCADE;
 
 CREATE TABLE public.beatmap_ratings
 (
@@ -156,7 +153,7 @@ CREATE TABLE public.beatmap_ratings
 ALTER TABLE public.beatmap_ratings
     OWNER TO postgres;
 
-DROP TABLE IF EXISTS public.beatmap_rating_adjustments;
+DROP TABLE IF EXISTS public.beatmap_rating_adjustments CASCADE;
 
 CREATE TABLE public.beatmap_rating_adjustments
 (
@@ -368,7 +365,7 @@ ALTER TABLE public.beatmap_rating_adjustments
                 game_id,
                 score: row.get("score"),
                 placement: row.get("placement"),
-                mods: row.get("mods")
+                mods: Mods::from_bits(row.get("mods")).unwrap()
             };
             result.entry(game_id).or_default().push(score);
         }
@@ -643,7 +640,7 @@ ALTER TABLE public.beatmap_rating_adjustments
         for rating in beatmap_ratings {
             let row_data = format!(
                 "{}\t{}\t{}\t{}\t{}\n",
-                rating.beatmap_id, rating.ruleset as i32, rating.mods, rating.rating, rating.volatility,
+                rating.beatmap_id, rating.ruleset as i32, rating.mods.bits(), rating.rating, rating.volatility,
             );
 
             let data_bytes = Bytes::from(row_data.into_bytes());
@@ -763,7 +760,7 @@ ALTER TABLE public.beatmap_rating_adjustments
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                     adjustment.beatmap_id,
                     beatmap_rating_id,
-                    adjustment.mods,
+                    adjustment.mods.bits(),
                     adjustment.ruleset as i32,
                     game_id_str,
                     adjustment.rating_before,

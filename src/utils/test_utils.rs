@@ -1,6 +1,6 @@
 use crate::{
     database::db_structs::{
-        Game, GameScore, Match, Player, PlayerPlacement, PlayerRating, RatingAdjustment, RulesetData
+        Game, GameScore, Match, Mods, Player, PlayerPlacement, PlayerRating, RatingAdjustment, RulesetData
     },
     model::structures::{rating_adjustment_type::RatingAdjustmentType, ruleset::Ruleset}
 };
@@ -111,7 +111,7 @@ pub fn generate_game(id: i32, placements: &[PlayerPlacement]) -> Game {
             game_id: id,
             score: 0,
             placement: p.placement,
-            mods: 0
+            mods: Mods::None
         })
         .collect();
 
