@@ -262,7 +262,7 @@ impl OtrModel {
             let mut new_map_rating = new_ratings[0][0].clone();
             new_map_rating.mu = new_map_rating.mu.clamp(100., 4000.);
             new_map_rating.sigma = new_map_rating.sigma.clamp(10., 300.);
-            rating_by_mod.insert(mods, new_ratings[0][0].clone());
+            rating_by_mod.insert(mods, new_map_rating);
         }
 
         rating_by_mod
