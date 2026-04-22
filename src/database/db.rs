@@ -566,17 +566,17 @@ ALTER TABLE public.beatmap_rating_adjustments
     }
 
     pub async fn save_results(&self, results: OtrProcessResult) {
-        // self.truncate_table("rating_adjustments").await;
-        // self.truncate_table("player_ratings").await;
+        self.truncate_table("rating_adjustments").await;
+        self.truncate_table("player_ratings").await;
         self.truncate_table("beatmap_ratings").await;
         self.truncate_table("beatmap_rating_adjustments").await;
 
         self.save_beatmap_ratings_and_adjustments_with_mapping(&results.beatmap_ratings).await;
 
-        // self.save_ratings_and_adjustments_with_mapping(&results.player_ratings)
-        //     .await;
-        //
-        // self.insert_or_update_highest_ranks(&results.player_ratings).await;
+        self.save_ratings_and_adjustments_with_mapping(&results.player_ratings)
+            .await;
+        
+        self.insert_or_update_highest_ranks(&results.player_ratings).await;
     }
 
     async fn save_ratings_and_adjustments_with_mapping(&self, player_ratings: &[PlayerRating]) {
