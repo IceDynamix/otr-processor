@@ -3,7 +3,10 @@ use otr_processor::{
     args::Args,
     database::db::DbClient,
     messaging::RabbitMqPublisher,
-    model::{otr_model::OtrModel, rating_utils::create_initial_ratings},
+    model::{
+        otr_model::OtrModel,
+        rating_utils::{create_initial_beatmap_ratings, create_initial_ratings}
+    },
     utils::test_utils::generate_country_mapping_players
 };
 use std::{collections::HashMap, time::Instant};
@@ -48,6 +51,8 @@ async fn main() {
 
     // Execute all operations
     let process_result = async {
+        client.migrate().await;
+
         // 1. Calculate and update game score placements
         // This must happen before data fetching and rating processing
         client.calculate_and_update_game_score_placements().await;
@@ -56,6 +61,7 @@ async fn main() {
         // 2. Fetch matches and players for processing
         let matches = client.get_matches().await;
         let players = client.get_players().await;
+        let beatmaps = client.get_beatmaps().await;
 
         if matches.is_empty() {
             warn!("No matches found to process! Check that matches have verification_status=4");
@@ -74,14 +80,17 @@ async fn main() {
 
         // 3. Generate initial ratings
         let initial_ratings = create_initial_ratings(&players, &matches);
-        info!("Initial ratings generated.");
+        info!("Initial player ratings generated.");
+
+        let initial_map_ratings = create_initial_beatmap_ratings(&beatmaps);
+        info!("Initial beatmap ratings generated.");
 
         // 4. Generate country mapping and set
         let country_mapping: HashMap<i32, String> = generate_country_mapping_players(&players);
         info!("Country mapping generated.");
 
         // 5. Create the model
-        let mut model = OtrModel::new(&initial_ratings, &country_mapping);
+        let mut model = OtrModel::new(&initial_ratings, &initial_map_ratings, &country_mapping);
         info!("OTR model created.");
 
         // 6. Process matches
@@ -89,7 +98,7 @@ async fn main() {
         info!("Matches processed.");
 
         // 7. Save results in database
-        client.save_results(&results).await;
+        client.save_results(results).await;
         info!("Results saved to database.");
 
         // 8. Remove lingering stats for tournaments/matches rejected since the last run

@@ -1,6 +1,6 @@
 use super::constants::FALLBACK_RATING;
 use crate::{
-    database::db_structs::{Match, Player, PlayerRating, RatingAdjustment},
+    database::db_structs::{Beatmap, BeatmapRating, Match, Player, PlayerRating, RatingAdjustment},
     model::{
         constants::{DEFAULT_VOLATILITY, INITIAL_RATING_CEILING, INITIAL_RATING_FLOOR},
         structures::{rating_adjustment_type::RatingAdjustmentType, ruleset::Ruleset}
@@ -84,6 +84,24 @@ pub fn create_initial_ratings(players: &[Player], matches: &[Match]) -> Vec<Play
     }
 
     ratings
+}
+
+pub fn create_initial_beatmap_ratings(beatmaps: &[Beatmap]) -> Vec<BeatmapRating> {
+    beatmaps
+        .iter()
+        .map(|b| BeatmapRating {
+            id: 0, // set by db
+            beatmap_id: b.id,
+            ruleset: b.ruleset,
+            mods: 0, // nomod
+            rating: initial_map_rating(b),
+            volatility: 400.0
+        })
+        .collect()
+}
+
+fn initial_map_rating(beatmap: &Beatmap) -> f64 {
+    1500.0 // TODO: improve with sr
 }
 
 fn initial_rating(player: &Player, ruleset: &Ruleset) -> f64 {

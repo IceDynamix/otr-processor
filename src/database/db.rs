@@ -2,7 +2,11 @@ use super::db_structs::{
     Game, GameScore, Match, Player, PlayerHighestRank, PlayerRating, RatingAdjustment, ReplicationRole, RulesetData,
     TournamentInfo
 };
-use crate::{model::structures::ruleset::Ruleset, utils::progress_utils::progress_span};
+use crate::{
+    database::db_structs::{Beatmap, BeatmapRating},
+    model::{otr_model::OtrProcessResult, structures::ruleset::Ruleset},
+    utils::progress_utils::progress_span
+};
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
 use futures::SinkExt;
@@ -16,6 +20,7 @@ use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 const MATCH_BATCH_SIZE: usize = 500;
 const PLAYER_BATCH_SIZE: i64 = 5000;
+const MAP_BATCH_SIZE: i64 = 5000;
 
 struct MatchMetadata {
     id: i32,
@@ -122,6 +127,47 @@ impl DbClient {
             client: Arc::new(client),
             ignore_constraints
         })
+    }
+
+    pub async fn migrate(&self) {
+        info!("Migrating (adding beatmap_ratings table)...");
+
+        self.client
+            .batch_execute(
+                "\
+                drop table if exists public.beatmap_ratings;
+
+                create table public.beatmap_ratings
+                (
+                    id         integer generated always as identity
+                        constraint beatmap_ratings_pk
+                            primary key,
+                    beatmap_id integer                                            not null
+                        constraint beatmap_ratings_beatmaps_id_fk
+                            references public.beatmaps
+                            on delete cascade,
+                    mods       integer                                            not null,
+                    ruleset    integer                                            not null,
+                    rating     double precision         default 1500.0            not null,
+                    volatility double precision         default 400.0             not null,
+                    created    timestamp with time zone default CURRENT_TIMESTAMP not null
+                );
+
+                alter table public.beatmap_ratings
+                    owner to postgres;
+        "
+            )
+            .await
+            .unwrap();
+
+        // create unique index if not exists beatmap_ratings_beatmap_id_mods_ruleset_uindex
+        // on public.beatmap_ratings (beatmap_id, mods, ruleset);
+        //
+        // create index if not exists beatmap_ratings_rating_index
+        // on public.beatmap_ratings (rating);
+        //
+        // create index if not exists beatmap_ratings_ruleset_index
+        // on public.beatmap_ratings (ruleset);
     }
 
     pub async fn get_matches(&self) -> Vec<Match> {
@@ -237,7 +283,7 @@ impl DbClient {
 
         let id_list = match_ids.iter().map(|id| id.to_string()).join(",");
         let query = format!(
-            "SELECT id, ruleset, start_time, end_time, match_id
+            "SELECT id, ruleset, start_time, end_time, match_id, beatmap_id
              FROM games
              WHERE match_id = ANY(ARRAY[{}]) AND verification_status = 4
              ORDER BY id",
@@ -254,6 +300,7 @@ impl DbClient {
                 ruleset: Ruleset::try_from(row.get::<_, i32>("ruleset")).unwrap(),
                 start_time: row.get("start_time"),
                 end_time: row.get("end_time"),
+                beatmap_id: row.get("beatmap_id"),
                 scores: Vec::new()
             };
             result.entry(match_id).or_default().push(game);
@@ -269,7 +316,7 @@ impl DbClient {
 
         let id_list = game_ids.iter().map(|id| id.to_string()).join(",");
         let query = format!(
-            "SELECT id, player_id, game_id, score, placement
+            "SELECT id, player_id, game_id, score, placement, mods
              FROM game_scores
              WHERE game_id = ANY(ARRAY[{}]) AND verification_status = 4
              ORDER BY game_id, id",
@@ -286,7 +333,8 @@ impl DbClient {
                 player_id: row.get("player_id"),
                 game_id,
                 score: row.get("score"),
-                placement: row.get("placement")
+                placement: row.get("placement"),
+                mods: row.get("mods")
             };
             result.entry(game_id).or_default().push(score);
         }
@@ -431,15 +479,74 @@ impl DbClient {
         None
     }
 
-    pub async fn save_results(&self, player_ratings: &[PlayerRating]) {
-        self.truncate_table("rating_adjustments").await;
-        self.truncate_table("player_ratings").await;
+    /// Fetches all beatmaps from the database with their ruleset data.
+    pub async fn get_beatmaps(&self) -> Vec<Beatmap> {
+        info!("Fetching players...");
 
-        self.save_ratings_and_adjustments_with_mapping(&player_ratings).await;
-        self.insert_or_update_highest_ranks(player_ratings).await;
+        let total_count: i64 = self
+            .client
+            .query_one("SELECT COUNT(DISTINCT b.id) as cnt FROM beatmaps b", &[])
+            .await
+            .map(|r| r.get("cnt"))
+            .unwrap_or(0);
+
+        let span = progress_span(total_count as u64, "Fetching maps");
+        let _guard = span.enter();
+
+        let mut all_beatmaps: Vec<Beatmap> = Vec::new();
+        let mut last_id: i32 = 0;
+
+        loop {
+            let batch = self.fetch_beatmap_batch(last_id).await;
+
+            if batch.is_empty() {
+                break;
+            }
+
+            last_id = batch.last().map(|p| p.id).unwrap_or(last_id);
+            span.pb_inc(batch.len() as u64);
+            all_beatmaps.extend(batch);
+        }
+
+        info!("Beatmaps fetched: {} total", all_beatmaps.len());
+        all_beatmaps
     }
 
-    async fn save_ratings_and_adjustments_with_mapping(&self, player_ratings: &&[PlayerRating]) {
+    async fn fetch_beatmap_batch(&self, after_id: i32) -> Vec<Beatmap> {
+        let query = "
+            SELECT id, sr, ruleset
+            FROM beatmaps b
+            WHERE b.id > $1
+            ORDER BY b.id
+            LIMIT $2";
+
+        self.client
+            .query(query, &[&after_id, &MAP_BATCH_SIZE])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| Beatmap {
+                id: row.get("id"),
+                sr: row.get("sr"),
+                ruleset: Ruleset::try_from(row.get::<_, i32>("ruleset")).unwrap()
+            })
+            .collect()
+    }
+
+    pub async fn save_results(&self, results: OtrProcessResult) {
+        self.truncate_table("rating_adjustments").await;
+        self.truncate_table("player_ratings").await;
+        self.truncate_table("beatmap_ratings").await;
+
+        self.save_beatmap_ratings(&results.beatmap_ratings).await;
+
+        self.save_ratings_and_adjustments_with_mapping(&results.player_ratings)
+            .await;
+
+        self.insert_or_update_highest_ranks(&results.player_ratings).await;
+    }
+
+    async fn save_ratings_and_adjustments_with_mapping(&self, player_ratings: &[PlayerRating]) {
         info!(count = player_ratings.len(), "Saving player ratings with adjustments");
 
         let mut mapping: HashMap<i32, Vec<RatingAdjustment>> = HashMap::new();
@@ -455,6 +562,50 @@ impl DbClient {
         self.save_rating_adjustments(&mapping).await;
 
         info!("Rating adjustments saved");
+    }
+    async fn save_beatmap_ratings(&self, beatmap_ratings: &[BeatmapRating]) {
+        info!(count = beatmap_ratings.len(), "Saving beatmap ratings");
+
+        if beatmap_ratings.is_empty() {
+            error!("No beatmap_rating data to save to database");
+            panic!();
+        }
+
+        let copy_query = "COPY beatmap_ratings (beatmap_id, ruleset, mods, rating, volatility) \
+            FROM STDIN WITH (FORMAT TEXT, DELIMITER E'\\t')";
+
+        let sink = self
+            .client
+            .copy_in(copy_query)
+            .await
+            .expect("Failed to initiate COPY IN operation for beatmap_ratings");
+
+        tokio::pin!(sink);
+
+        let span = progress_span(beatmap_ratings.len() as u64, "Saving beatmap ratings");
+        let _guard = span.enter();
+
+        for rating in beatmap_ratings {
+            let row_data = format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                rating.beatmap_id, rating.ruleset as i32, rating.mods, rating.rating, rating.volatility,
+            );
+
+            let data_bytes = Bytes::from(row_data.into_bytes());
+            sink.send(data_bytes)
+                .await
+                .expect("Failed to send data to COPY operation");
+
+            span.pb_inc(1);
+        }
+
+        sink.close()
+            .await
+            .expect("Failed to finalize COPY operation for beatmap_ratings");
+
+        drop(_guard);
+
+        info!("Beatmap rating adjustments saved");
     }
 
     /// Save all rating adjustments in a single batch query using PostgreSQL COPY
@@ -712,7 +863,7 @@ impl DbClient {
 
         // Query to get tournament information for the processed matches
         let query = format!(
-            "SELECT DISTINCT 
+            "SELECT DISTINCT
                 t.id AS tournament_id,
                 t.name AS tournament_name,
                 COUNT(DISTINCT m.id) AS match_count,

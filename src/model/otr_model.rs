@@ -3,7 +3,7 @@ use super::{
     decay::UnifiedDecaySystem
 };
 use crate::{
-    database::db_structs::{Game, GameScore, Match, PlayerRating, RatingAdjustment},
+    database::db_structs::{BeatmapRating, Game, GameScore, Match, PlayerRating, RatingAdjustment},
     model::{
         constants::{
             ABSOLUTE_RATING_FLOOR, DEFAULT_VOLATILITY, GAME_CORRECTION_CONSTANT, STANDARD_MATCH_LENGTH, WEIGHT_A,
@@ -15,6 +15,7 @@ use crate::{
     utils::progress_utils::progress_span
 };
 use chrono::{Duration, Utc};
+use indexmap::IndexMap;
 use itertools::Itertools;
 use openskill::{
     model::{model::Model, plackett_luce::PlackettLuce},
@@ -25,12 +26,17 @@ use strum::IntoEnumIterator;
 use tracing::{debug, error, info, warn};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
+pub struct OtrProcessResult {
+    pub player_ratings: Vec<PlayerRating>,
+    pub beatmap_ratings: Vec<BeatmapRating>
+}
+
 /// o!TR Model Implementation
 ///
 /// This file handles the core rating calculations for the o!TR system.
 /// It uses a modified PlackettLuce rating model combined with a custom decay system to provide
 /// accurate tournament performance ratings.
-///  
+///
 /// # Rating Process
 /// 1. **Match Processing**: Each match is processed chronologically
 ///    - Players' ratings are decayed if inactive
@@ -51,6 +57,7 @@ pub struct OtrModel {
     pub model: PlackettLuce,
     /// Tracks and maintains all player ratings
     pub rating_tracker: RatingTracker,
+    pub beatmap_ratings: IndexMap<(i32, Ruleset, i32), BeatmapRating>,
     /// Unified system for rating and volatility decay at Wednesday 12:00 UTC
     decay_system: UnifiedDecaySystem
 }
@@ -62,15 +69,25 @@ impl OtrModel {
     /// - A custom gamma function for volatility control
     /// - Default beta and kappa values from OpenSkill
     /// - Initial player ratings loaded into the tracker
-    pub fn new(initial_player_ratings: &[PlayerRating], country_mapping: &HashMap<i32, String>) -> OtrModel {
+    pub fn new(
+        initial_player_ratings: &[PlayerRating],
+        initial_beatmap_ratings: &[BeatmapRating],
+        country_mapping: &HashMap<i32, String>
+    ) -> OtrModel {
         let mut tracker = RatingTracker::new();
         tracker.set_country_mapping(country_mapping.clone());
         tracker.insert_or_update(initial_player_ratings);
 
+        let mut beatmap_ratings = IndexMap::new();
+        for r in initial_beatmap_ratings {
+            beatmap_ratings.insert((r.beatmap_id, r.ruleset, r.mods), r.clone());
+        }
+
         OtrModel {
             rating_tracker: tracker,
             model: PlackettLuce::new(BETA, KAPPA, Self::gamma_override),
-            decay_system: UnifiedDecaySystem::new()
+            decay_system: UnifiedDecaySystem::new(),
+            beatmap_ratings
         }
     }
 
@@ -91,7 +108,7 @@ impl OtrModel {
     ///
     /// # Returns
     /// Returns a vector of all PlayerRatings after processing
-    pub fn process(&mut self, matches: &[Match]) -> Vec<PlayerRating> {
+    pub fn process(&mut self, matches: &[Match]) -> OtrProcessResult {
         let span = progress_span(matches.len() as u64, "Processing matches");
         let _guard = span.enter();
 
@@ -122,7 +139,10 @@ impl OtrModel {
         info!("Finished processing matches, applying final decay pass");
         self.final_decay_pass();
         self.rating_tracker.sort();
-        self.rating_tracker.get_all_ratings()
+        OtrProcessResult {
+            player_ratings: self.rating_tracker.get_all_ratings(),
+            beatmap_ratings: self.beatmap_ratings.values().cloned().collect()
+        }
     }
 
     // Match Processing Methods
@@ -141,12 +161,96 @@ impl OtrModel {
         self.apply_unified_decay(match_.start_time);
         self.ensure_player_ratings(match_);
 
+        self.apply_map_ratings(match_);
+
         let ratings_a = self.generate_ratings_a(match_);
         let ratings_b = self.generate_ratings_b(match_);
 
         let final_results = self.calc_new_ratings(ratings_a, ratings_b, match_);
 
-        self.apply_results(match_, &final_results)
+        self.apply_results(match_, &final_results);
+    }
+
+    fn apply_map_ratings(&mut self, match_: &Match) {
+        for game in &match_.games {
+            let rating_by_mod = self.rate_map_by_mods(game);
+            for (mod_, rating) in rating_by_mod {
+                self.beatmap_ratings
+                    .entry((game.beatmap_id, game.ruleset, mod_))
+                    .and_modify(|r| {
+                        r.rating = rating.mu.max(ABSOLUTE_RATING_FLOOR);
+                        r.volatility = rating.sigma.min(DEFAULT_VOLATILITY);
+                    });
+            }
+        }
+    }
+
+    fn rate_map_by_mods(&self, game: &Game) -> HashMap<i32, Rating> {
+        let mut rating_by_mod: HashMap<i32, Rating> = HashMap::new();
+
+        let scores_by_mod: HashMap<i32, Vec<&GameScore>> =
+            game.scores.iter().into_grouping_map_by(|s| s.mods).collect();
+
+        for (mods, scores) in scores_by_mod {
+            if mods != 0 {
+                // TODO: impl mods
+                continue;
+            }
+
+            let map_key = (game.beatmap_id, game.ruleset, mods);
+            let map_rating = match self.beatmap_ratings.get(&(game.beatmap_id, game.ruleset, mods)) {
+                Some(r) => Rating {
+                    mu: r.rating,
+                    sigma: r.volatility
+                },
+                None => continue
+            };
+
+            let player_ratings: Vec<Rating> = scores
+                .iter()
+                .map(|s| match self.rating_tracker.get_rating(s.player_id, game.ruleset) {
+                    Some(r) => Rating {
+                        mu: r.rating,
+                        sigma: r.volatility
+                    },
+                    None => Rating {
+                        mu: FALLBACK_RATING,
+                        sigma: DEFAULT_VOLATILITY
+                    }
+                })
+                .collect();
+
+            let teams = vec![map_rating]
+                .into_iter()
+                .chain(player_ratings)
+                .map(|r| vec![r])
+                .collect();
+
+            let threshold = Self::clear_threshold(&game.ruleset);
+            let clearing_scores = scores.iter().filter(|s| s.score >= threshold).count();
+
+            let mut placements: Vec<usize> = scores
+                .iter()
+                .map(|s| (s.placement + if s.score >= 500000 { 0 } else { 1 }) as usize)
+                .collect();
+
+            placements.insert(0, clearing_scores);
+
+            let new_ratings = self.model.rate(teams, placements);
+
+            rating_by_mod.insert(mods, new_ratings[0][0].clone());
+        }
+
+        rating_by_mod
+    }
+
+    fn clear_threshold(ruleset: &Ruleset) -> i32 {
+        match ruleset {
+            Ruleset::Osu => 500000,
+            Ruleset::Taiko => 900000,
+            Ruleset::Catch => 900000,
+            Ruleset::ManiaOther | Ruleset::Mania4k | Ruleset::Mania7k => 900000
+        }
     }
 
     /// Generates ratings for each player based on their actual game performances.
@@ -208,7 +312,8 @@ impl OtrModel {
                     player_id,
                     game_id: game.id,
                     score: 0,
-                    placement: tie_for_last_placement
+                    placement: tie_for_last_placement,
+                    mods: 0
                 });
             }
         }
@@ -525,7 +630,7 @@ mod tests {
 
         let countries = generate_country_mapping_player_ratings(player_ratings.as_slice(), "US");
 
-        let model = OtrModel::new(player_ratings.as_slice(), &countries);
+        let model = OtrModel::new(player_ratings.as_slice(), &[], &countries);
 
         let placements = vec![
             generate_placement(1, 2),
@@ -557,7 +662,7 @@ mod tests {
         ];
 
         let countries = generate_country_mapping_player_ratings(player_ratings.as_slice(), "US");
-        let mut model = OtrModel::new(player_ratings.as_slice(), &countries);
+        let mut model = OtrModel::new(player_ratings.as_slice(), &[], &countries);
 
         let placements = vec![
             generate_placement(1, 4),
@@ -670,7 +775,7 @@ mod tests {
             .collect();
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         // Create a match where players maintain their position
         let placements: Vec<PlayerPlacement> = (1..=4).map(|id| generate_placement(id, id)).collect();
@@ -717,7 +822,7 @@ mod tests {
         ];
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let model = OtrModel::new(&player_ratings, &countries);
+        let model = OtrModel::new(&player_ratings, &[], &countries);
 
         // Create a game with 3 players, where player 3 is NOT in the rating tracker
         let placements = vec![
@@ -775,7 +880,7 @@ mod tests {
         ];
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let model = OtrModel::new(&player_ratings, &countries);
+        let model = OtrModel::new(&player_ratings, &[], &countries);
 
         // Create an Osu game with all 4 players
         let placements = vec![
@@ -844,7 +949,7 @@ mod tests {
         ];
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         // Create an Osu match with games that include the Taiko-only player
         let placements_game1 = vec![
@@ -954,7 +1059,7 @@ mod tests {
         let player_ratings = vec![generate_player_rating(1, Osu, 1200.0, 100.0, 1, None, None)];
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         // Create matches with player 2 who has no initial rating
         let placements = vec![
@@ -1021,7 +1126,7 @@ mod tests {
     fn test_rating_adjustment_uses_match_end_time() {
         let player_ratings = vec![generate_player_rating(1, Osu, 1000.0, 100.0, 1, None, None)];
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         let placements = vec![generate_placement(1, 1), generate_placement(2, 2)];
         let games = vec![generate_game(1, &placements)];
@@ -1053,7 +1158,7 @@ mod tests {
     fn test_rating_adjustment_falls_back_to_start_time() {
         let player_ratings = vec![generate_player_rating(1, Osu, 1000.0, 100.0, 1, None, None)];
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         let placements = vec![generate_placement(1, 1), generate_placement(2, 2)];
         let games = vec![generate_game(1, &placements)];
@@ -1079,7 +1184,7 @@ mod tests {
     fn test_initial_rating_timestamp_uses_end_time() {
         let player_ratings = vec![generate_player_rating(1, Osu, 1000.0, 100.0, 1, None, None)];
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         let placements = vec![generate_placement(1, 1), generate_placement(2, 2)];
         let games = vec![generate_game(1, &placements)];
@@ -1115,7 +1220,7 @@ mod tests {
     fn test_initial_rating_timestamp_fallback() {
         let player_ratings = vec![generate_player_rating(1, Osu, 1000.0, 100.0, 1, None, None)];
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         let placements = vec![generate_placement(1, 1), generate_placement(2, 2)];
         let games = vec![generate_game(1, &placements)];
@@ -1150,7 +1255,8 @@ mod tests {
                 player_id: p.player_id,
                 game_id: id,
                 score: 0,
-                placement: p.placement
+                placement: p.placement,
+                mods: 0
             })
             .collect();
 
@@ -1159,7 +1265,8 @@ mod tests {
             ruleset,
             start_time: Default::default(),
             end_time: Default::default(),
-            scores
+            scores,
+            beatmap_id: 0
         }
     }
 
@@ -1172,7 +1279,7 @@ mod tests {
         ];
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         let current_time = old_match_time + Duration::days(DECAY_DAYS as i64 + 30);
 
@@ -1226,7 +1333,7 @@ mod tests {
         ];
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         let osu_placements = vec![generate_placement(1, 1), generate_placement(2, 2)];
         let osu_games = vec![generate_game_for_ruleset(1, Osu, &osu_placements)];
@@ -1278,7 +1385,7 @@ mod tests {
         ];
 
         let countries = generate_country_mapping_player_ratings(&player_ratings, "US");
-        let mut model = OtrModel::new(&player_ratings, &countries);
+        let mut model = OtrModel::new(&player_ratings, &[], &countries);
 
         // Game 1: thighhigh(1st), glixh_hunt3r(2nd), Miori Celesta(3rd), PotjeNutella(4th)
         let game1_placements = vec![
