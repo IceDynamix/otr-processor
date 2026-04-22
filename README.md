@@ -23,6 +23,10 @@ while processing a match, a map is treated like a separate player with a [specif
 
 the map is [rated against the other players in the game](https://github.com/IceDynamix/otr-processor/blob/map-ratings/src/model/otr_model.rs#L206) and the result is stored in the new table `beatmap_ratings`. changes to the beatmap ratings are also tracked and stored in `beatmap_rating_adjustments`. these tables don't exist in the public replica, the tables are (re)created in the processor (which does not follow the migration format that otr uses, afaik its drizzle orm). you can find the exact sql [here](https://github.com/IceDynamix/otr-processor/blob/map-ratings/src/database/db.rs#L129) 
 
+## download the csv of map ratings
+
+head to [releases](https://github.com/IceDynamix/otr-processor/releases)
+
 ## compiling results yourself
 
 most instructions are the same as the [original development guide](https://docs.otr.stagec.net/Development/Development-Guide#prerequisites)
