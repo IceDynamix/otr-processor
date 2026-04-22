@@ -110,7 +110,8 @@ pub fn generate_game(id: i32, placements: &[PlayerPlacement]) -> Game {
             player_id: p.player_id,
             game_id: id,
             score: 0,
-            placement: p.placement
+            placement: p.placement,
+            mods: 0
         })
         .collect();
 
@@ -119,6 +120,8 @@ pub fn generate_game(id: i32, placements: &[PlayerPlacement]) -> Game {
         ruleset: Ruleset::Osu,
         start_time: Default::default(),
         end_time: Default::default(),
+        beatmap_id: 0,
+        scoring_type: 3,
         scores
     }
 }

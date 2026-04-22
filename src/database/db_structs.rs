@@ -39,7 +39,8 @@ pub struct Match {
 pub struct Beatmap {
     pub id: i32,
     pub ruleset: Ruleset,
-    pub sr: f64
+    pub sr: f64,
+    pub created: DateTime<FixedOffset>
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,7 +50,24 @@ pub struct BeatmapRating {
     pub ruleset: Ruleset,
     pub mods: i32,
     pub rating: f64,
-    pub volatility: f64
+    pub volatility: f64,
+    pub count_played: i32,
+    pub adjustments: Vec<BeatmapRatingAdjustment>
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BeatmapRatingAdjustment {
+    pub id: i32,
+    pub beatmap_id: i32,
+    pub mods: i32,
+    pub ruleset: Ruleset,
+    pub game_id: Option<i32>,
+    pub rating_before: f64,
+    pub rating_after: f64,
+    pub volatility_before: f64,
+    pub volatility_after: f64,
+    pub timestamp: DateTime<FixedOffset>,
+    pub adjustment_type: RatingAdjustmentType
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +77,7 @@ pub struct Game {
     pub start_time: DateTime<FixedOffset>,
     pub end_time: DateTime<FixedOffset>,
     pub beatmap_id: i32,
+    pub scoring_type: i32,
     pub scores: Vec<GameScore>
 }
 

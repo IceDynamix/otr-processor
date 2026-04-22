@@ -3,7 +3,9 @@ use super::{
     decay::UnifiedDecaySystem
 };
 use crate::{
-    database::db_structs::{BeatmapRating, Game, GameScore, Match, PlayerRating, RatingAdjustment},
+    database::db_structs::{
+        Beatmap, BeatmapRating, BeatmapRatingAdjustment, Game, GameScore, Match, PlayerRating, RatingAdjustment
+    },
     model::{
         constants::{
             ABSOLUTE_RATING_FLOOR, DEFAULT_VOLATILITY, GAME_CORRECTION_CONSTANT, STANDARD_MATCH_LENGTH, WEIGHT_A,
@@ -57,6 +59,7 @@ pub struct OtrModel {
     pub model: PlackettLuce,
     /// Tracks and maintains all player ratings
     pub rating_tracker: RatingTracker,
+    pub beatmaps: Vec<Beatmap>,
     pub beatmap_ratings: IndexMap<(i32, Ruleset, i32), BeatmapRating>,
     /// Unified system for rating and volatility decay at Wednesday 12:00 UTC
     decay_system: UnifiedDecaySystem
@@ -71,23 +74,19 @@ impl OtrModel {
     /// - Initial player ratings loaded into the tracker
     pub fn new(
         initial_player_ratings: &[PlayerRating],
-        initial_beatmap_ratings: &[BeatmapRating],
+        beatmaps: Vec<Beatmap>,
         country_mapping: &HashMap<i32, String>
     ) -> OtrModel {
         let mut tracker = RatingTracker::new();
         tracker.set_country_mapping(country_mapping.clone());
         tracker.insert_or_update(initial_player_ratings);
 
-        let mut beatmap_ratings = IndexMap::new();
-        for r in initial_beatmap_ratings {
-            beatmap_ratings.insert((r.beatmap_id, r.ruleset, r.mods), r.clone());
-        }
-
         OtrModel {
             rating_tracker: tracker,
             model: PlackettLuce::new(BETA, KAPPA, Self::gamma_override),
             decay_system: UnifiedDecaySystem::new(),
-            beatmap_ratings
+            beatmaps,
+            beatmap_ratings: IndexMap::new()
         }
     }
 
@@ -173,19 +172,38 @@ impl OtrModel {
 
     fn apply_map_ratings(&mut self, match_: &Match) {
         for game in &match_.games {
+            if game.scoring_type != 3 {
+                continue;
+            }
+
             let rating_by_mod = self.rate_map_by_mods(game);
-            for (mod_, rating) in rating_by_mod {
-                self.beatmap_ratings
-                    .entry((game.beatmap_id, game.ruleset, mod_))
-                    .and_modify(|r| {
-                        r.rating = rating.mu.max(ABSOLUTE_RATING_FLOOR);
-                        r.volatility = rating.sigma.min(DEFAULT_VOLATILITY);
-                    });
+            for (mods, new_rating) in rating_by_mod {
+                let rating = self
+                    .beatmap_ratings
+                    .get_mut(&(game.beatmap_id, game.ruleset, mods)) // inserted in rate_map_by_mods
+                    .unwrap();
+
+                rating.adjustments.push(BeatmapRatingAdjustment {
+                    id: 0,
+                    beatmap_id: game.beatmap_id,
+                    mods,
+                    ruleset: game.ruleset,
+                    game_id: Some(game.id),
+                    rating_before: rating.rating,
+                    rating_after: new_rating.mu,
+                    volatility_before: rating.volatility,
+                    volatility_after: new_rating.sigma,
+                    timestamp: Default::default(),
+                    adjustment_type: RatingAdjustmentType::Match
+                });
+
+                rating.rating = new_rating.mu;
+                rating.volatility = new_rating.sigma;
             }
         }
     }
 
-    fn rate_map_by_mods(&self, game: &Game) -> HashMap<i32, Rating> {
+    fn rate_map_by_mods(&mut self, game: &Game) -> HashMap<i32, Rating> {
         let mut rating_by_mod: HashMap<i32, Rating> = HashMap::new();
 
         let scores_by_mod: HashMap<i32, Vec<&GameScore>> =
@@ -197,13 +215,18 @@ impl OtrModel {
                 continue;
             }
 
-            let map_key = (game.beatmap_id, game.ruleset, mods);
-            let map_rating = match self.beatmap_ratings.get(&(game.beatmap_id, game.ruleset, mods)) {
-                Some(r) => Rating {
-                    mu: r.rating,
-                    sigma: r.volatility
-                },
-                None => continue
+            let beatmap_rating = self
+                .beatmap_ratings
+                .entry((game.beatmap_id, game.ruleset, mods))
+                .or_insert_with(|| {
+                    crate::model::rating_utils::default_beatmap_rating(
+                        self.beatmaps.iter().find(|b| b.id == game.beatmap_id).unwrap()
+                    )
+                });
+
+            let map_rating = Rating {
+                mu: beatmap_rating.rating,
+                sigma: beatmap_rating.volatility
             };
 
             let player_ratings: Vec<Rating> = scores
@@ -231,7 +254,7 @@ impl OtrModel {
 
             let mut placements: Vec<usize> = scores
                 .iter()
-                .map(|s| (s.placement + if s.score >= 500000 { 0 } else { 1 }) as usize)
+                .map(|s| (s.placement + if s.score >= threshold { 0 } else { 1 }) as usize)
                 .collect();
 
             placements.insert(0, clearing_scores);
@@ -1265,6 +1288,7 @@ mod tests {
             ruleset,
             start_time: Default::default(),
             end_time: Default::default(),
+            scoring_type: 3,
             scores,
             beatmap_id: 0
         }

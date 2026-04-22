@@ -3,10 +3,7 @@ use otr_processor::{
     args::Args,
     database::db::DbClient,
     messaging::RabbitMqPublisher,
-    model::{
-        otr_model::OtrModel,
-        rating_utils::{create_initial_beatmap_ratings, create_initial_ratings}
-    },
+    model::{otr_model::OtrModel, rating_utils::create_initial_ratings},
     utils::test_utils::generate_country_mapping_players
 };
 use std::{collections::HashMap, time::Instant};
@@ -82,15 +79,12 @@ async fn main() {
         let initial_ratings = create_initial_ratings(&players, &matches);
         info!("Initial player ratings generated.");
 
-        let initial_map_ratings = create_initial_beatmap_ratings(&beatmaps);
-        info!("Initial beatmap ratings generated.");
-
         // 4. Generate country mapping and set
         let country_mapping: HashMap<i32, String> = generate_country_mapping_players(&players);
         info!("Country mapping generated.");
 
         // 5. Create the model
-        let mut model = OtrModel::new(&initial_ratings, &initial_map_ratings, &country_mapping);
+        let mut model = OtrModel::new(&initial_ratings, beatmaps, &country_mapping);
         info!("OTR model created.");
 
         // 6. Process matches

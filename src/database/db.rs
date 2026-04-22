@@ -1,6 +1,6 @@
 use super::db_structs::{
-    Game, GameScore, Match, Player, PlayerHighestRank, PlayerRating, RatingAdjustment, ReplicationRole, RulesetData,
-    TournamentInfo
+    BeatmapRatingAdjustment, Game, GameScore, Match, Player, PlayerHighestRank, PlayerRating, RatingAdjustment,
+    ReplicationRole, RulesetData, TournamentInfo
 };
 use crate::{
     database::db_structs::{Beatmap, BeatmapRating},
@@ -135,26 +135,31 @@ impl DbClient {
         self.client
             .batch_execute(
                 "\
-                drop table if exists public.beatmap_ratings;
-
-                create table public.beatmap_ratings
-                (
-                    id         integer generated always as identity
-                        constraint beatmap_ratings_pk
-                            primary key,
-                    beatmap_id integer                                            not null
-                        constraint beatmap_ratings_beatmaps_id_fk
-                            references public.beatmaps
-                            on delete cascade,
-                    mods       integer                                            not null,
-                    ruleset    integer                                            not null,
-                    rating     double precision         default 1500.0            not null,
-                    volatility double precision         default 400.0             not null,
-                    created    timestamp with time zone default CURRENT_TIMESTAMP not null
-                );
-
-                alter table public.beatmap_ratings
-                    owner to postgres;
+CREATE TABLE public.beatmap_rating_adjustments
+(
+    id                integer                                            NOT NULL,
+    mods              integer                                            NOT NULL,
+    ruleset           integer                                            NOT NULL,
+    rating_before     double precision                                   NOT NULL,
+    rating_after      double precision                                   NOT NULL,
+    volatility_before double precision                                   NOT NULL,
+    volatility_after  double precision                                   NOT NULL,
+    adjustment_type   integer                                            NOT NULL,
+    timestamp         timestamp with time zone                           NOT NULL,
+    beatmap_id        integer                                            NOT NULL
+        CONSTRAINT beatmap_rating_adjustments_beatmaps_id_fk
+            REFERENCES public.beatmaps
+            ON DELETE CASCADE,
+    beatmap_rating_id integer                                            NOT NULL
+        CONSTRAINT beatmap_rating_adjustments_beatmap_ratings_id_fk
+            REFERENCES public.beatmap_ratings
+            ON DELETE CASCADE,
+    game_id           integer
+        CONSTRAINT fk_rating_adjustments_games_game_id
+            REFERENCES games
+            ON DELETE CASCADE,
+    created           timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
         "
             )
             .await
@@ -283,7 +288,7 @@ impl DbClient {
 
         let id_list = match_ids.iter().map(|id| id.to_string()).join(",");
         let query = format!(
-            "SELECT id, ruleset, start_time, end_time, match_id, beatmap_id
+            "SELECT id, ruleset, start_time, end_time, match_id, beatmap_id, scoring_type
              FROM games
              WHERE match_id = ANY(ARRAY[{}]) AND verification_status = 4
              ORDER BY id",
@@ -301,6 +306,7 @@ impl DbClient {
                 start_time: row.get("start_time"),
                 end_time: row.get("end_time"),
                 beatmap_id: row.get("beatmap_id"),
+                scoring_type: row.get("scoring_type"),
                 scores: Vec::new()
             };
             result.entry(match_id).or_default().push(game);
@@ -514,7 +520,7 @@ impl DbClient {
 
     async fn fetch_beatmap_batch(&self, after_id: i32) -> Vec<Beatmap> {
         let query = "
-            SELECT id, sr, ruleset
+            SELECT id, sr, ruleset, created
             FROM beatmaps b
             WHERE b.id > $1
             ORDER BY b.id
@@ -528,22 +534,24 @@ impl DbClient {
             .map(|row| Beatmap {
                 id: row.get("id"),
                 sr: row.get("sr"),
-                ruleset: Ruleset::try_from(row.get::<_, i32>("ruleset")).unwrap()
+                ruleset: Ruleset::try_from(row.get::<_, i32>("ruleset")).unwrap(),
+                created: row.get("created")
             })
             .collect()
     }
 
     pub async fn save_results(&self, results: OtrProcessResult) {
-        self.truncate_table("rating_adjustments").await;
-        self.truncate_table("player_ratings").await;
+        // self.truncate_table("rating_adjustments").await;
+        // self.truncate_table("player_ratings").await;
         self.truncate_table("beatmap_ratings").await;
+        self.truncate_table("beatmap_rating_adjustments").await;
 
-        self.save_beatmap_ratings(&results.beatmap_ratings).await;
+        self.save_beatmap_ratings_and_adjustments_with_mapping(&results.beatmap_ratings).await;
 
-        self.save_ratings_and_adjustments_with_mapping(&results.player_ratings)
-            .await;
-
-        self.insert_or_update_highest_ranks(&results.player_ratings).await;
+        // self.save_ratings_and_adjustments_with_mapping(&results.player_ratings)
+        //     .await;
+        //
+        // self.insert_or_update_highest_ranks(&results.player_ratings).await;
     }
 
     async fn save_ratings_and_adjustments_with_mapping(&self, player_ratings: &[PlayerRating]) {
@@ -563,7 +571,26 @@ impl DbClient {
 
         info!("Rating adjustments saved");
     }
-    async fn save_beatmap_ratings(&self, beatmap_ratings: &[BeatmapRating]) {
+
+    async fn save_beatmap_ratings_and_adjustments_with_mapping(&self, beatmap_ratings: &[BeatmapRating]) {
+        info!(count = beatmap_ratings.len(), "Saving beatmap ratings with adjustments");
+
+        let mut mapping: HashMap<i32, Vec<BeatmapRatingAdjustment>> = HashMap::new();
+        let parent_ids = self.save_beatmap_ratings(beatmap_ratings).await;
+
+        for (i, rating) in beatmap_ratings.iter().enumerate() {
+            let parent_id = parent_ids.get(i).unwrap();
+            mapping.insert(*parent_id, rating.adjustments.clone());
+        }
+
+        debug!(mapping_count = mapping.len(), "Created beatmap adjustment mapping");
+
+        self.save_beatmap_rating_adjustments(&mapping).await;
+
+        info!("Beatmap rating adjustments saved");
+    }
+
+    async fn save_beatmap_ratings(&self, beatmap_ratings: &[BeatmapRating]) -> Vec<i32> {
         info!(count = beatmap_ratings.len(), "Saving beatmap ratings");
 
         if beatmap_ratings.is_empty() {
@@ -606,6 +633,20 @@ impl DbClient {
         drop(_guard);
 
         info!("Beatmap rating adjustments saved");
+
+        // Query back the IDs - we need to match on the unique combination of fields
+        // Since we just inserted these records, we can order by ID and take the last N records
+        let count = beatmap_ratings.len() as i64;
+        let rows = self
+            .client
+            .query("SELECT id FROM beatmap_ratings ORDER BY id DESC LIMIT $1", &[&count])
+            .await
+            .unwrap();
+
+        // Reverse to get them in insertion order
+        let mut ids: Vec<i32> = rows.iter().map(|row| row.get("id")).collect();
+        ids.reverse();
+        ids
     }
 
     /// Save all rating adjustments in a single batch query using PostgreSQL COPY
@@ -642,6 +683,59 @@ impl DbClient {
                     adjustment.ruleset as i32,
                     player_rating_id,
                     match_id_str,
+                    adjustment.rating_before,
+                    adjustment.rating_after,
+                    adjustment.volatility_before,
+                    adjustment.volatility_after,
+                    adjustment.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                    adjustment.adjustment_type as i32
+                );
+
+                let data_bytes = Bytes::from(row_data.into_bytes());
+                sink.send(data_bytes)
+                    .await
+                    .expect("Failed to send data to COPY operation");
+            }
+            span.pb_inc(1);
+        }
+
+        sink.close().await.expect("Failed to finalize COPY operation");
+    }
+
+    /// Save all beatmap rating adjustments in a single batch query using PostgreSQL COPY
+    async fn save_beatmap_rating_adjustments(&self, adjustment_mapping: &HashMap<i32, Vec<BeatmapRatingAdjustment>>) {
+        if adjustment_mapping.is_empty() {
+            return;
+        }
+
+        let copy_query = "COPY beatmap_rating_adjustments (beatmap_id, beatmap_rating_id, mods, ruleset, game_id, rating_before, rating_after, volatility_before, volatility_after, timestamp, adjustment_type) \
+        FROM STDIN WITH (FORMAT TEXT, DELIMITER E'\\t')";
+
+        let span = progress_span(adjustment_mapping.len() as u64, "Saving rating adjustments");
+        let _guard = span.enter();
+
+        let sink = self
+            .client
+            .copy_in(copy_query)
+            .await
+            .expect("Failed to initiate COPY IN operation");
+
+        tokio::pin!(sink);
+
+        for (beatmap_rating_id, adjustments) in adjustment_mapping.iter() {
+            for adjustment in adjustments {
+                let game_id_str = adjustment
+                    .game_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "\\N".to_string());
+
+                let row_data = format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    adjustment.beatmap_id,
+                    beatmap_rating_id,
+                    adjustment.mods,
+                    adjustment.ruleset as i32,
+                    game_id_str,
                     adjustment.rating_before,
                     adjustment.rating_after,
                     adjustment.volatility_before,

@@ -1,6 +1,8 @@
 use super::constants::FALLBACK_RATING;
 use crate::{
-    database::db_structs::{Beatmap, BeatmapRating, Match, Player, PlayerRating, RatingAdjustment},
+    database::db_structs::{
+        Beatmap, BeatmapRating, BeatmapRatingAdjustment, Match, Player, PlayerRating, RatingAdjustment
+    },
     model::{
         constants::{DEFAULT_VOLATILITY, INITIAL_RATING_CEILING, INITIAL_RATING_FLOOR},
         structures::{rating_adjustment_type::RatingAdjustmentType, ruleset::Ruleset}
@@ -86,18 +88,29 @@ pub fn create_initial_ratings(players: &[Player], matches: &[Match]) -> Vec<Play
     ratings
 }
 
-pub fn create_initial_beatmap_ratings(beatmaps: &[Beatmap]) -> Vec<BeatmapRating> {
-    beatmaps
-        .iter()
-        .map(|b| BeatmapRating {
+pub fn default_beatmap_rating(b: &Beatmap) -> BeatmapRating {
+    BeatmapRating {
+        id: 0, // set by db
+        beatmap_id: b.id,
+        ruleset: b.ruleset,
+        mods: 0, // nomod
+        rating: initial_map_rating(b),
+        volatility: DEFAULT_VOLATILITY,
+        count_played: 0,
+        adjustments: vec![BeatmapRatingAdjustment {
             id: 0, // set by db
             beatmap_id: b.id,
             ruleset: b.ruleset,
-            mods: 0, // nomod
-            rating: initial_map_rating(b),
-            volatility: 400.0
-        })
-        .collect()
+            mods: 0,
+            game_id: None,
+            rating_before: 0.0,
+            rating_after: initial_map_rating(b),
+            volatility_before: 0.0,
+            volatility_after: DEFAULT_VOLATILITY,
+            timestamp: b.created,
+            adjustment_type: RatingAdjustmentType::Initial
+        }]
+    }
 }
 
 fn initial_map_rating(beatmap: &Beatmap) -> f64 {
