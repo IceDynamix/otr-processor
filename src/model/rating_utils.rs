@@ -162,13 +162,15 @@ fn initial_map_rating(beatmap: &Beatmap, mods: Mods) -> (f64, f64) {
 /// ORDER BY FLOOR(ra.rating_after / 100) * 100;
 /// ```
 fn mu_from_star_rating(sr: f64, ruleset: &Ruleset) -> f64 {
-    match ruleset {
+    let r = match ruleset {
         Ruleset::Osu | Ruleset::Catch => sr * 1367.40918 - 6775.346485, // 250k score threshold
         Ruleset::Taiko => sr * 1301.27899 - 6338.942843,
         // Ruleset::Catch => {} // score threshold 800k, but there's so little data that i'll just copy standard
         Ruleset::ManiaOther | Ruleset::Mania4k => sr * 1749.712882 - 7719.206747, // score threshold 800k
         Ruleset::Mania7k => sr * 700.0 - 2300.0                                   // no data, so i'm eyeballing it
-    }
+    };
+
+    r.clamp(500.0, 2500.0)
 }
 
 fn initial_rating(player: &Player, ruleset: &Ruleset) -> f64 {

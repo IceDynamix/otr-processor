@@ -256,7 +256,9 @@ impl OtrModel {
             placements.insert(0, clearing_scores);
 
             let new_ratings = self.model.rate(teams, placements);
-
+            let mut new_map_rating = new_ratings[0][0].clone();
+            new_map_rating.mu = new_map_rating.mu.clamp(100., 4000.);
+            new_map_rating.sigma = new_map_rating.sigma.clamp(10., 300.);
             rating_by_mod.insert(mods, new_ratings[0][0].clone());
         }
 
@@ -286,9 +288,9 @@ impl OtrModel {
             Ruleset::ManiaOther | Ruleset::Mania4k => 960_000.0,
             Ruleset::Mania7k => 920_000.0
         };
-    
+
         let mod_mult = mods.mod_score_multiplier(ruleset);
-    
+
         base * mod_mult
     }
 
